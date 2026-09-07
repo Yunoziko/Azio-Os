@@ -6,16 +6,51 @@ import { ThemeToggle } from "@/components/theme/theme-toggle";
 import { buttonVariants } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { UpgradeButton } from "@/components/billing/upgrade-button";
-import type { PlanDefinition } from "@/lib/billing/config";
+import type { BillingPlanId, PlanDefinition } from "@/lib/billing/config";
+
+function ProPlanCta({
+  signedIn,
+  currentPlan,
+}: {
+  signedIn: boolean;
+  currentPlan: BillingPlanId | null;
+}) {
+  if (!signedIn) {
+    return (
+      <Link href="/signup" className={cn(buttonVariants(), "w-full")}>
+        Start Pro
+      </Link>
+    );
+  }
+
+  if (currentPlan === "PRO") {
+    return (
+      <div className="grid gap-2">
+        <p className="text-center text-sm font-medium">Current plan</p>
+        <Link href="/settings/billing" className={cn(buttonVariants({ variant: "outline" }), "w-full")}>
+          Manage subscription
+        </Link>
+      </div>
+    );
+  }
+
+  return (
+    <div className="grid gap-2">
+      <UpgradeButton className="w-full" label="Upgrade to Pro" />
+      <UpgradeButton className="w-full" interval="ANNUAL" variant="outline" label="Go yearly · ₹4,999" />
+    </div>
+  );
+}
 
 export function PricingView({
   signedIn,
-  billingReady,
+  currentPlan,
   plans,
   benefits,
 }: {
   signedIn: boolean;
   billingReady: boolean;
+  currentPlan: BillingPlanId | null;
   plans: PlanDefinition[];
   benefits: string[];
 }) {
@@ -75,26 +110,8 @@ export function PricingView({
                   >
                     {signedIn ? "Continue with Free" : "Get started"}
                   </Link>
-                ) : signedIn ? (
-                  billingReady ? (
-                    <div className="grid gap-2">
-                      <UpgradeButton className="w-full" label="Upgrade to Pro" />
-                      <UpgradeButton
-                        className="w-full"
-                        interval="ANNUAL"
-                        variant="outline"
-                        label="Go yearly · ₹4,999"
-                      />
-                    </div>
-                  ) : (
-                    <p className="text-sm text-muted-foreground">
-                      Billing isn’t configured on this server yet. You can still use AZIO on the Free plan.
-                    </p>
-                  )
                 ) : (
-                  <Link href="/signup" className={cn(buttonVariants(), "w-full")}>
-                    Start Pro
-                  </Link>
+                  <ProPlanCta signedIn={signedIn} currentPlan={currentPlan} />
                 )}
               </div>
             </article>
