@@ -13,6 +13,8 @@ import { verifyRazorpayPaymentSignature } from "@/lib/billing/payment-signature"
 import { getRazorpayClient } from "@/lib/billing/razorpay-client";
 import { getUserPlan } from "@/lib/billing/entitlements";
 import { revalidateWorkspace } from "@/lib/actions/workspace-revalidate";
+import { appLog } from "@/lib/observability/log";
+import { createRequestId } from "@/lib/security/http";
 
 const CURRENCY = "INR";
 
@@ -70,6 +72,40 @@ function paymentCaptured(payment: RazorpayPaymentEntity) {
   return payment.status === "captured" || payment.captured === true;
 }
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
+}
+
+function safeText(value: unknown, max = 180): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed.slice(0, max) : null;
+}
+
+function safeRazorpayFailure(error: unknown) {
+  const obj = asRecord(error);
+  const nested = asRecord(obj?.error);
+  const status =
+    typeof obj?.statusCode === "number"
+      ? obj.statusCode
+      : typeof obj?.status === "number"
+        ? obj.status
+        : null;
+  return {
+    razorpayStatus: status,
+    razorpayCode: safeText(nested?.code ?? obj?.code),
+    razorpayDescription: safeText(nested?.description ?? obj?.description),
+  };
+}
+
+function safeDbFailure(error: unknown) {
+  const obj = asRecord(error);
+  return {
+    dbCode: safeText(obj?.code),
+    dbName: safeText(obj?.name),
+  };
+}
+
 export async function createProCheckoutOrder(input: {
   userId: string;
   email: string;
@@ -92,32 +128,85 @@ export async function createProCheckoutOrder(input: {
 
   const amountPaise = planAmountPaise(input.plan, input.interval);
   const razorpay = getRazorpayClient();
-  const order = (await razorpay.orders.create({
-    amount: amountPaise,
+  const requestId = createRequestId();
+  const checkoutMeta = {
+    requestId,
+    plan: input.plan,
+    interval: input.interval,
+    amountPaise,
     currency: CURRENCY,
-    receipt: receiptFor(input.userId),
-    notes: {
-      azio_user_id: input.userId,
-      azio_plan: input.plan,
-      azio_interval: input.interval,
-    },
-  })) as RazorpayOrderEntity;
+  };
+
+  appLog.info("billing_checkout_razorpay_order_start", {
+    ...checkoutMeta,
+    step: "razorpay_order_create",
+  });
+
+  let order: RazorpayOrderEntity;
+  try {
+    order = (await razorpay.orders.create({
+      amount: amountPaise,
+      currency: CURRENCY,
+      receipt: receiptFor(input.userId),
+      notes: {
+        azio_user_id: input.userId,
+        azio_plan: input.plan,
+        azio_interval: input.interval,
+      },
+    })) as RazorpayOrderEntity;
+  } catch (error) {
+    appLog.error("billing_checkout_razorpay_order_failed", {
+      ...checkoutMeta,
+      step: "razorpay_order_create",
+      ...safeRazorpayFailure(error),
+    });
+    throw error;
+  }
 
   if (!order.id) {
+    appLog.error("billing_checkout_razorpay_order_failed", {
+      ...checkoutMeta,
+      step: "razorpay_order_create",
+      razorpayStatus: null,
+      razorpayCode: "missing_order_id",
+      razorpayDescription: "Razorpay returned an order without an id.",
+    });
     throw new BillingError("provider", "AZIO couldn’t create a Razorpay order.");
   }
 
-  await prisma.paymentOrder.create({
-    data: {
-      userId: input.userId,
-      plan: input.plan as BillingPlan,
-      interval: input.interval as BillingInterval,
-      amountPaise,
-      currency: CURRENCY,
-      razorpayOrderId: order.id,
-      status: "CREATED",
-    },
+  appLog.info("billing_checkout_razorpay_order_created", {
+    ...checkoutMeta,
+    step: "razorpay_order_create",
+    razorpayOrderId: order.id,
   });
+
+  appLog.info("billing_checkout_payment_order_start", {
+    ...checkoutMeta,
+    step: "payment_order_create",
+    razorpayOrderId: order.id,
+  });
+
+  try {
+    await prisma.paymentOrder.create({
+      data: {
+        userId: input.userId,
+        plan: input.plan as BillingPlan,
+        interval: input.interval as BillingInterval,
+        amountPaise,
+        currency: CURRENCY,
+        razorpayOrderId: order.id,
+        status: "CREATED",
+      },
+    });
+  } catch (error) {
+    appLog.error("billing_checkout_payment_order_failed", {
+      ...checkoutMeta,
+      step: "payment_order_create",
+      razorpayOrderId: order.id,
+      ...safeDbFailure(error),
+    });
+    throw error;
+  }
 
   const definition = PLAN_CATALOG.PRO;
   revalidateWorkspace(["/settings/billing", "/pricing"]);
